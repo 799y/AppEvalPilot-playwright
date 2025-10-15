@@ -15,6 +15,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Tuple, Union
+from contextlib import suppress
 
 import pyautogui
 import pyperclip
@@ -46,6 +47,10 @@ try:
     _HAS_PYATSPI = True
 except Exception:  # pragma: no cover - absence on non-Linux
     _HAS_PYATSPI = False
+
+with suppress(Exception):
+    # Optional import; only required for Playwright platform
+    from playwright.async_api import async_playwright
 
 
 class BaseController:
@@ -271,6 +276,97 @@ class AndroidController(BaseController):
             offset += len(new_send_keys) - len(send_keys)
 
         return modified_code
+
+
+class PlaywrightController(BaseController):
+    """Playwright async controller.
+
+    NOTE: Must be used with await from asyncio context.
+    """
+
+    def __init__(self, cdp_url: str = "http://localhost:9222"):
+        self.cdp_url = cdp_url
+        self._pw = None
+        self.browser = None
+        self.context = None
+        self.page = None
+
+    async def initialize(self):
+        try:
+            if 'async_playwright' not in globals() and 'async_playwright' not in locals():
+                raise ImportError("playwright is not installed")
+            self._pw = await async_playwright().start()
+            try:
+                self.browser = await self._pw.chromium.connect_over_cdp(self.cdp_url)
+                contexts = self.browser.contexts
+                if contexts:
+                    self.context = contexts[0]
+                    pages = self.context.pages
+                    self.page = next((pg for pg in pages if not pg.url.startswith("devtools://")), pages[0] if pages else await self.context.new_page())
+                else:
+                    self.context = await self.browser.new_context()
+                    self.page = await self.context.new_page()
+                logger.info("Connected to existing Chrome via CDP for Playwright controller (async)")
+            except Exception as e:
+                logger.warning(f"CDP connect failed, launching new Chromium (async): {e}")
+                self.browser = await self._pw.chromium.launch(headless=False)
+                self.context = await self.browser.new_context()
+                self.page = await self.context.new_page()
+        except Exception as e:
+            logger.error(f"Failed to initialize Playwright controller (async): {str(e)}")
+            raise
+
+    async def async_get_screenshot(self, filepath: str) -> None:
+        if not self.page:
+            raise RuntimeError("Playwright page is not initialized")
+        await self.page.screenshot(path=filepath)
+
+    async def async_goto(self, url: str) -> None:
+        if not self.page:
+            raise RuntimeError("Playwright page is not initialized")
+        await self.page.goto(url)
+
+    async def arun_action(self, action: str) -> None:
+        raw = self._extract_code(action)
+        logger.info(f"Executing async code: {raw}")
+
+        # Normalize into lines and auto-insert 'await' for common Playwright calls if missing
+        statements = [s.strip() for s in raw.split(";") if s.strip()]
+        awaited_lines = []
+        keywords = ("goto(", "locator(", ".click(", ".fill(", ".press(", ".wheel(", ".screenshot(")
+        for stmt in statements:
+            s = stmt
+            low = s.replace(" ", "")
+            needs_await = (
+                not s.startswith("await ")
+                and ("self.page." in s or "page." in s)
+                and any(k in low for k in keywords)
+            )
+            if needs_await:
+                s = "await " + s
+            awaited_lines.append(s)
+
+        # Wrap into async function body
+        func_code = (
+            "async def __runner(self, page):\n"
+            + "    import asyncio, time\n"
+            + "\n".join(["    " + line for line in awaited_lines])
+            + "\n"
+        )
+        local_env = {}
+        exec(func_code, {}, local_env)
+        await local_env["__runner"](self, self.page)
+
+    async def aclose(self):
+        with suppress(Exception):
+            if self.context:
+                await self.context.close()
+        with suppress(Exception):
+            if self.browser:
+                await self.browser.close()
+        with suppress(Exception):
+            if self._pw:
+                await self._pw.stop()
 
 
 class PCController(BaseController):
@@ -1394,7 +1490,7 @@ class ControllerTool:
     def __init__(self, platform: str = "Android", **kwargs):
         """Create controller by platform.
 
-        Supported platforms: "Android", "Windows", "Linux", "Ubuntu".
+        Supported platforms: "Android", "Windows", "Linux", "Ubuntu", "Playwright".
         """
         if platform == "Android":
             self.controller = AndroidController()
@@ -1404,6 +1500,8 @@ class ControllerTool:
         elif platform in ("Linux", "Ubuntu"):
             kwargs["pc_type"] = "linux"
             self.controller = PCController(**kwargs)
+        elif platform == "Playwright":
+            self.controller = PlaywrightController(**kwargs)
         else:
             raise ValueError(f"Unsupported device type: {platform}")
 
@@ -1425,6 +1523,6 @@ def create_controller(platform: str = "Android", **kwargs) -> ControllerTool:
     Raises:
         ValueError: Raised when device type is invalid
     """
-    if platform not in ["Android", "Windows", "Linux", "Ubuntu"]:
+    if platform not in ["Android", "Windows", "Linux", "Ubuntu", "Playwright"]:
         raise ValueError(f"Unsupported device type: {platform}")
     return ControllerTool(platform, **kwargs)

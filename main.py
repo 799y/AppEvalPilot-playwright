@@ -46,13 +46,14 @@ async def run_api_test():
         # Initialize automated test role
         appeval = AppEvalRole(
             json_file=json_file,
-            use_ocr=False,
+            use_ocr=True,
             quad_split_ocr=False,
             use_memory=False,
             use_reflection=True,
             use_chrome_debugger=False,
             extend_xml_infos=True,
             max_iters=20,
+            os_type="Playwright",
         )
         # project_excel = r"data/test.xlsx"
         # case_excel = r"data/test_results.xlsx"
@@ -100,7 +101,7 @@ async def run_api_test():
             }
         }
         test_cases = case_result_example["1"]["test_cases"]
-        result, executability = await appeval.run_api(task_name="MGX", test_cases=test_cases, start_func="http://localhost:7687", log_dir="work_dirs/MGX")
+        result, executability = await appeval.run_api(task_name="MGX", test_cases=test_cases, start_func="https://www.saucedemo.com/", log_dir="MGX")
         # eval output format
         # {'0': {'result': 'Pass', 'evidence': 'All required login page UI elements are present and properly displayed: username/email input field at (1414, 750), password input field at (1414, 840), and sign in button at (1413, 984). The elements are clearly visible and positioned appropriately on the login form.'}, '1': {'result': 'Pass', 'evidence': "Successfully entered alphanumeric string 'Test123User' into the username field. The field accepted and displayed the input correctly without any restrictions or errors."}, '2': {'result': 'Pass', 'evidence': "The password field successfully masks input characters - when 'testpass123' was entered, it displays as bullet points/dots (•••••••••••) instead of plain text, providing proper password security."}, '3': {'result': 'Uncertain', 'evidence': 'Unable to verify special character acceptance in password field due to connection error with accounts.google.com (ERR_CONNECTION_CLOSED)'}}
         logger.info(f"Batch test execution result: {result}")
@@ -234,7 +235,7 @@ async def main():
     """Main function"""
     # Run single test example
     # logger.info("Starting to execute single test...")
-    # await run_single_test()
+    # await run_single_test(mode="api")
 
     # Run batch test example
     # logger.info("Starting to execute batch test...")

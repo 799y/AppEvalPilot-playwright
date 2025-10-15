@@ -29,7 +29,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fi
 
 from appeval.actions.reflection import Reflection
 from appeval.actions.screen_info_extractor import ScreenInfoExtractor
-from appeval.prompts.osagent import ActionPromptContext, Android_prompt, PC_prompt
+from appeval.prompts.osagent import ActionPromptContext, Android_prompt, PC_prompt, Playwright_prompt
 from appeval.tools.chrome_debugger import ChromeDebugger
 from appeval.tools.device_controller import ControllerTool
 from appeval.tools.icon_detect import IconDetectTool
@@ -126,7 +126,7 @@ class OSAgent(Role):
         """Initialize OSAgent.
 
         Args:
-            platform (str): Operating system type (Windows, Linux, Mac, or Android).
+            platform (str): Operating system type (Windows, Linux, Mac, Android, or Playwright).
             max_iters (int): Maximum number of iterations.
             use_ocr (bool): Whether to use OCR.
             quad_split_ocr (bool): Whether to split image into four parts for OCR recognition.
@@ -267,6 +267,10 @@ class OSAgent(Role):
                 },
                 "prompt_class": PC_prompt,
             },
+            "Playwright": {
+                "controller_args": {"platform": "Playwright"},
+                "prompt_class": Playwright_prompt,
+            },
         }
 
         if self.platform not in platform_configs:
@@ -276,6 +280,17 @@ class OSAgent(Role):
         logger.info(f"Initializing controller: {config['controller_args']}")
         self.controller = ControllerTool(**config["controller_args"])
         self.prompt_utils = config["prompt_class"]()
+
+    async def _ensure_platform_ready(self) -> None:
+        """Initialize platform-specific async resources (e.g., Playwright)."""
+        try:
+            if getattr(self, "platform", None) == "Playwright":
+                ctrl = getattr(self, "controller", None)
+                if ctrl and hasattr(ctrl, "initialize") and getattr(ctrl, "page", None) is None:
+                    await ctrl.initialize()
+        except Exception as e:
+            logger.error(f"Playwright initialize failed: {e}")
+            raise
 
     def _reset_state(self) -> None:
         """Reset state, clear previous records when running new tasks"""
@@ -424,7 +439,10 @@ class OSAgent(Role):
             tuple: Tuple containing perception information list, image width, image height and output image path.
         """
         # Get screen screenshot
-        self.controller.get_screenshot(screenshot_file)
+        if getattr(self, "platform", None) == "Playwright" and hasattr(self.controller, "async_get_screenshot"):
+            await self.controller.async_get_screenshot(screenshot_file)
+        else:
+            self.controller.get_screenshot(screenshot_file)
         # Get screen screenshot width and height
         width, height = Image.open(screenshot_file).size
 
@@ -793,10 +811,12 @@ class OSAgent(Role):
         else:
             # Execute other actions
             try:
-                if self.platform in ["Android", "Windows", "Linux"]:
+                if self.platform == "Playwright" and hasattr(self.controller, "arun_action"):
+                    await self.controller.arun_action(self.rc.action)
+                elif self.platform in ["Android", "Windows", "Linux"]:
                     self.controller.run_action(self.rc.action)
                 else:
-                    logger.error("Currently only supports Android, Windows and Linux")
+                    logger.error("Currently only supports Android, Windows, Linux and Playwright")
             except Exception as e:
                 # For direct exit when using tell in automg
                 if isinstance(e, SystemExit) and e.code == 0:
@@ -964,6 +984,7 @@ class OSAgent(Role):
         """
         self._reset_state()  # Reset state for each run
         self._setup_logs()  # Reset logs for each run
+        await self._ensure_platform_ready()  # Ensure async platform ready
         self.instruction = instruction
 
         rsp = await self.react()

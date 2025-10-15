@@ -433,6 +433,114 @@ You must choose one of the actions below:
         return self.package_name_template.format(app_name=app_name, platform=self.platform, mapping_info=mapping_info, package_list=package_list)
 
 
+class Playwright_prompt(BasePrompt):
+    def __init__(self):
+        super().__init__("Playwright")
+
+        # Web (Playwright) specific hints
+        self.hints += r"""
+Use precise CSS/text locators when possible. Prefer deterministic selection over coordinates.
+If an element is out of view, scroll it into view first. When in doubt, use locator(...).scroll_into_view_if_needed().
+Use small, sequential actions; avoid long chains that may fail mid-way.
+        """
+
+        # Playwright-specific task requirements
+        self.task_requirements = """
+In order to meet the user's requirements on a web page, you must select ONE of the following actions:
+
+- Run (your code)
+    You can use this action to run python code executed in a Playwright context. Your code will run using `self.page` (already provided) to control the browser.
+
+    Common operations:
+    - self.page.goto(url)
+    - self.page.locator(selector).click()
+    - self.page.locator(selector).fill(\"\"\"text\"\"\")
+    - self.page.keyboard.press("Enter")
+    - self.page.mouse.wheel(0, 800)  # scroll down
+    - self.page.screenshot(path=\"\"\"path\"\"\")
+
+    Each action sequence should end with a `time.sleep(duration)` to wait for UI update (0.5~2s typically).
+    Example: Run (self.page.goto(\"\"\"https://example.com\"\"\"); time.sleep(1); self.page.locator("text=Login").click(); time.sleep(1))
+
+- Tell (your answer)
+    If the user's instruction has been fully satisfied and a final answer is required, use this action to provide the result in English. The final answer must be inside the brackets.
+
+- Stop
+    If all operations are completed and no further action is required, stop the process.
+"""
+
+    def get_action_prompt(self, ctx: ActionPromptContext) -> str:
+        image_desc = (
+            "image is a computer screenshot captured from the current browser page."
+        )
+        background = self.background_template.format(image_desc=image_desc, width=ctx.width, height=ctx.height, instruction=ctx.instruction)
+
+        location_format = {
+            "center": "The format of the coordinates is [x, y]...",
+            "bbox": "The format of the coordinates is [x1, y1, x2, y2]...",
+        }[ctx.location_info]
+
+        content_format = """the content can be:
+1. text from OCR
+2. icon description or 'icon'
+3. element information from DOM accessibility tree (id/name/role/bounds)
+"""
+
+        clickable_info = "\n".join(
+            f"{info['coordinates']}; {info['text']}"
+            for info in ctx.clickable_infos
+            if info["text"] != "" and info["text"] != "icon: None" and info["coordinates"] != (0, 0)
+        )
+
+        screenshot_info = self.screenshot_info_template.format(
+            source_desc="on the current screenshot through system files",
+            location_format=location_format,
+            content_format=content_format,
+            clickable_info=clickable_info,
+        )
+
+        history_operations = ""
+        if len(ctx.action_history) > 0:
+            history_details = ""
+            for i in range(len(ctx.action_history)):
+                history_details += f"Step-{i+1}:\n\tOperation: {ctx.summary_history[i]}\n\tAction: {ctx.action_history[i]}\n"
+                history_details += f"\tReflection_thought: {ctx.reflection_thought_history[i] if len(ctx.reflection_thought_history) == len(ctx.action_history) else 'None'}\n"
+                history_details += f"\tMemory: {ctx.memory[i] if len(ctx.memory) == len(ctx.action_history) else 'None'}\n"
+            history_operations = self.history_template.format(memory_timing="before", history_details=history_details)
+
+        task_list = (
+            f"### Last Task List ###\nHere is the task list generated previously...\n{ctx.task_list}"
+            if ctx.task_list
+            else ""
+        )
+
+        last_operation = ""
+        if ctx.error_flag:
+            last_operation = f'### Last operation ###\nYou previously executed "{ctx.last_action}" but it did not meet expectation. Reflect and revise your operation.'
+
+        reflection_thought = (
+            f"### The reflection thought of the last operation ###\n{ctx.reflection_thought}" if ctx.error_flag and ctx.reflection_thought else ""
+        )
+
+        return self.prompt_template.format(
+            background=background,
+            screenshot_info=screenshot_info,
+            hints=self.hints,
+            additional_info=ctx.add_info,
+            history_operations=history_operations,
+            task_list=task_list,
+            last_operation=last_operation,
+            reflection_thought=reflection_thought,
+            task_requirements=self.task_requirements,
+            output_format=self.output_format.format(
+                action_options="Run () or Tell () or Stop. Only one action can be output at one time."
+            ),
+        )
+
+    def get_package_name_prompt(self, app_name: str, app_mapping: str, package_list: List[str]) -> str:
+        # Not applicable for Playwright web; return minimal template
+        return self.package_name_template.format(app_name=app_name, platform=self.platform, mapping_info="", package_list=package_list)
+
 case_batch_check_system_prompt = """
 You are a professional and responsible web testing engineer (with real operation capabilities). I will provide you with a test task list, and you need to provide test results for all test tasks. If you fail to complete the test tasks, it may cause significant losses to the client. Please maintain the test tasks and their results in a task list. For test cases of a project, you must conduct thorough testing with at least five steps or more - the more tests, the more reliable the results.
 

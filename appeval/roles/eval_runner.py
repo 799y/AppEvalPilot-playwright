@@ -428,7 +428,16 @@ class AppEvalRole(Role):
             # Set up logging directory
             self.osagent.log_dirs = f"work_dirs/{log_dir}/{task_name}"
             if start_func.startswith("http"):
-                await start_windows(target_url=start_func)
+                # If using Playwright platform, force initialize then navigate inside Playwright
+                if getattr(self, "osagent", None) and getattr(self.osagent, "platform", None) == "Playwright":
+                    ctrl = getattr(self.osagent, "controller", None)
+                    if ctrl is not None and hasattr(ctrl, "initialize") and hasattr(ctrl, "async_goto"):
+                        await ctrl.initialize()
+                        await ctrl.async_goto(start_func)
+                    else:
+                        await start_windows(target_url=start_func)
+                else:
+                    await start_windows(target_url=start_func)
             else:
                 await start_windows(work_path=start_func)
             await asyncio.sleep(30)
@@ -459,11 +468,14 @@ class AppEvalRole(Role):
             # execute executability check
             image = self.osagent.output_image_path
             executability = await self.test_generator.generate_executability(result_dict, image)
-            # Cleanup: kill windows and processes
-            if start_func.startswith("http"):
-                await kill_windows(["Chrome"])
+            # Cleanup: kill windows and processes (skip when using Playwright controller)
+            if getattr(self, "osagent", None) and getattr(self.osagent, "platform", None) == "Playwright":
+                pass
             else:
-                await kill_windows(["Chrome", "cmd", "npm", "projectapp", "Edge"])
+                if start_func.startswith("http"):
+                    await kill_windows(["Chrome"])
+                else:
+                    await kill_windows(["Chrome", "cmd", "npm", "projectapp", "Edge"])
             # Read and return results
             logger.info("Test process completed")
             return test_cases, executability
