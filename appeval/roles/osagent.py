@@ -1,11 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-@Time    : 2025/02/10
-@Author  : tanghaoming
-@File    : osagent.py
-@Desc    : Operating System Operation Assistant
-"""
 import asyncio
 import copy
 import json
@@ -516,11 +508,19 @@ class OSAgent(Role):
                     x1, y1, x2, y2 = perception_infos[i]["coordinates"]
                     perception_infos[i]["coordinates"] = [int((x1 + x2) / 2), int((y1 + y2) / 2)]
 
-        # If extend_xml_infos is enabled, then get XML information
-        if self.extend_xml_infos and self.platform in ["Android", "Windows", "Linux"]:
-            xml_results = self.controller.get_screen_xml(self.location_info)
-            logger.debug(xml_results)
-            perception_infos.extend(xml_results)
+        # If extend_xml_infos is enabled, then get structured element information
+        if self.extend_xml_infos:
+            if self.platform in ["Android", "Windows", "Linux"]:
+                xml_results = self.controller.get_screen_xml(self.location_info)
+                logger.debug(xml_results)
+                perception_infos.extend(xml_results)
+            elif self.platform == "Playwright" and hasattr(self.controller, "async_get_dom_infos"):
+                try:
+                    dom_results = await self.controller.async_get_dom_infos(self.location_info)
+                    logger.debug(dom_results)
+                    perception_infos.extend(dom_results)
+                except Exception as e:
+                    logger.warning(f"Playwright DOM info collection failed: {e}")
 
         return perception_infos, width, height, output_image_path
 
@@ -843,7 +843,8 @@ class OSAgent(Role):
         # Execute memory task asynchronously
         memory_task = None
         if self.use_memory:
-            memory_task = asyncio.create_task(self._async_memory_task(self.instruction, self.screenshot_file))
+            memory_insight = f"User's main goal is: {self.instruction}. The last action I took was: {self.rc.summary}."
+            memory_task = asyncio.create_task(self._async_memory_task(memory_insight, self.screenshot_file))
 
         # Update history records
         self.rc.thought_history.append(self.rc.thought)

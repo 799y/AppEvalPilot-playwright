@@ -334,6 +334,7 @@ class PlaywrightController(BaseController):
         statements = [s.strip() for s in raw.split(";") if s.strip()]
         awaited_lines = []
         keywords = ("goto(", "locator(", ".click(", ".fill(", ".press(", ".wheel(", ".screenshot(")
+        
         for stmt in statements:
             s = stmt
             low = s.replace(" ", "")
@@ -367,6 +368,77 @@ class PlaywrightController(BaseController):
         with suppress(Exception):
             if self._pw:
                 await self._pw.stop()
+
+    async def async_get_dom_infos(self, location_info: str = "center", max_nodes: int = 400) -> List[Dict]:
+        """Collect DOM element infos from the current page for perception.
+        Returns a list of dicts with keys: 'coordinates' and 'text'.
+        Coordinates follow location_info: 'center' -> [x,y], 'bbox' -> [x1,y1,x2,y2].
+        """
+        if not self.page:
+            return []
+        # Evaluate in page context to collect visible elements and their client rects
+        script = (
+            "() => {\n"
+            "  const isVisible = (el) => {\n"
+            "    const style = window.getComputedStyle(el);\n"
+            "    const rect = el.getBoundingClientRect();\n"
+            "    if (!rect || rect.width === 0 || rect.height === 0) return false;\n"
+            "    if (style.visibility === 'hidden' || style.display === 'none' || parseFloat(style.opacity||'1') === 0) return false;\n"
+            "    return true;\n"
+            "  };\n"
+            "  const nodes = Array.from(document.querySelectorAll('*')).slice(0, "
+            + str(max_nodes)
+            + ");\n"
+            "  const out = [];\n"
+            "  for (const el of nodes) {\n"
+            "    try {\n"
+            "      if (!isVisible(el)) continue;\n"
+            "      const rect = el.getBoundingClientRect();\n"
+            "      const x1 = Math.max(0, Math.round(rect.left));\n"
+            "      const y1 = Math.max(0, Math.round(rect.top));\n"
+            "      const x2 = Math.max(0, Math.round(rect.right));\n"
+            "      const y2 = Math.max(0, Math.round(rect.bottom));\n"
+            "      const cx = Math.round((x1 + x2) / 2);\n"
+            "      const cy = Math.round((y1 + y2) / 2);\n"
+            "      const role = (el.getAttribute('role')||'');\n"
+            "      const name = (el.getAttribute('name')||'');\n"
+            "      const id = (el.id||'');\n"
+            "      const cls = (el.className||'');\n"
+            "      const txt = (el.innerText||'').trim().slice(0, 120);\n"
+            "      out.push({ bbox: [x1,y1,x2,y2], center: [cx,cy], meta: { tag: el.tagName, role, id, cls, name, txt } });\n"
+            "    } catch(_){}\n"
+            "    if (out.length >= "
+            + str(max_nodes)
+            + ") break;\n"
+            "  }\n"
+            "  return out;\n"
+            "}"
+        )
+        try:
+            dom_nodes = await self.page.evaluate(script)
+        except Exception as e:
+            logger.warning(f"DOM evaluate failed: {e}")
+            return []
+
+        results: List[Dict] = []
+        for node in dom_nodes or []:
+            bbox = node.get("bbox") or [0, 0, 0, 0]
+            center = node.get("center") or [0, 0]
+            meta = node.get("meta") or {}
+            if location_info == "bbox":
+                coords = bbox
+            else:
+                coords = center
+            # Build concise text line similar to PC/Android XML entries
+            tag = meta.get("tag", "")
+            role = meta.get("role", "")
+            eid = meta.get("id", "")
+            cls = meta.get("cls", "")
+            name = meta.get("name", "")
+            txt = meta.get("txt", "")
+            text_line = f"tag={tag}; role={role}; id={eid}; class={cls}; name={name}; text={txt}"
+            results.append({"coordinates": coords, "text": text_line})
+        return results
 
 
 class PCController(BaseController):

@@ -442,6 +442,7 @@ class Playwright_prompt(BasePrompt):
 Use precise CSS/text locators when possible. Prefer deterministic selection over coordinates.
 If an element is out of view, scroll it into view first. When in doubt, use locator(...).scroll_into_view_if_needed().
 Use small, sequential actions; avoid long chains that may fail mid-way.
+If the previous action was a SUCCESSFUL Tell, the task is complete and you MUST use Stop in the current step. Do not attempt another Tell.
         """
 
         # Playwright-specific task requirements
@@ -463,8 +464,13 @@ In order to meet the user's requirements on a web page, you must select ONE of t
     Example: Run (self.page.goto(\"\"\"https://example.com\"\"\"); time.sleep(1); self.page.locator("text=Login").click(); time.sleep(1))
 
 - Tell (your answer)
-    If the user's instruction has been fully satisfied and a final answer is required, use this action to provide the result in English. The final answer must be inside the brackets.
-
+    If the user's instruction has been fully satisfied, use this action to provide the final result.
+    IMPORTANT: The content inside the brackets MUST be a valid Python expression, preferably a single string.
+    To ensure success, always enclose your entire answer in quotes.
+    Correct Example: Tell ("The weather for tomorrow is sunny with a high of 25 C.")
+    Correct Example for structured data: Tell ('{"result": "Pass", "evidence": "Login button is visible."}');Tell (["Tomorrow in Xiamen, Fujian, China: High 27 C, Low 21 C."])
+    Incorrect Example: Tell (The weather is sunny)  <- This will cause a syntax error.
+    After a SUCCESSFUL Tell action that provides the final answer, you MUST use the Stop action in the next step.
 - Stop
     If all operations are completed and no further action is required, stop the process.
 """
@@ -476,10 +482,9 @@ In order to meet the user's requirements on a web page, you must select ONE of t
         background = self.background_template.format(image_desc=image_desc, width=ctx.width, height=ctx.height, instruction=ctx.instruction)
 
         location_format = {
-            "center": "The format of the coordinates is [x, y]...",
-            "bbox": "The format of the coordinates is [x1, y1, x2, y2]...",
+            "center": "The format of the coordinates is [x, y], which represents the center point of the element. x is the pixel from left to right and y is the pixel from top to bottom. These coordinates are precise and directly usable - use this exact center coordinate when you need to click on the element (e.g., pyautogui.click(x, y)). Do NOT adjust or recalculate the coordinates;",
+            "bbox": "The format of the coordinates is [x1, y1, x2, y2], x is the pixel from left to right and y is the pixel from top to bottom. (x1, y1) is the coordinates of the upper-left corner, (x2, y2) is the coordinates of the bottom-right corner. To click the element, calculate and use the center point: ((x1+x2)//2, (y1+y2)//2);",
         }[ctx.location_info]
-
         content_format = """the content can be:
 1. text from OCR
 2. icon description or 'icon'
