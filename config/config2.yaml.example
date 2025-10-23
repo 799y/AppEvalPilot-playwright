@@ -1,11 +1,23 @@
+# llm:
+#   api_type: "openai"  # or azure / ollama / open_llm etc. Check LLMType for more options
+#   model: "claude-3-7-sonnet"  # or gpt-3.5-turbo-1106 / gpt-4-1106-preview
+#   base_url: "https://newapi.deepwisdom.ai/v1"  # or forward url / other llm url
+#   api_key: "sk-3DU0eFN5wyEw4LX8CPEDyK9VP6Ryxh4lkfDVUCkj5E3qeUVr"
+
+# case_generator:
+#   api_type: "openai"
+#   model: "claude-3-7-sonnet"
+#   base_url: "https://newapi.deepwisdom.ai/v1"
+#   api_key: "sk-3DU0eFN5wyEw4LX8CPEDyK9VP6Ryxh4lkfDVUCkj5E3qeUVr"
 llm:
-  api_type: "openai"
-  model: "claude-3-5-sonnet-v2"
-  base_url: "https://xxx.xxx/v1"
-  api_key: "sk-xxx"
+  api_type: "openai"  # or azure / ollama / open_llm etc. Check LLMType for more options
+  model: "claude-4-sonnet"  # or gpt-3.5-turbo-1106 / gpt-4-1106-preview
+  base_url: "https://newapi.deepwisdom.ai/v1"  # or forward url / other llm url
+  api_key: "sk-zs6Nb4zeW91PKU3fshE7DLLaXdARGMREVvhg6V3uSVolodoE"
 
 case_generator:
   api_type: "openai"
-  model: "claude-3-5-sonnet-v2"
-  base_url: "https://xxx.xxx/v1"
-  api_key: "sk-xxx"
+  model: "claude-4-sonnet"
+  base_url: "https://newapi.deepwisdom.ai/v1"
+  api_key: "sk-zs6Nb4zeW91PKU3fshE7DLLaXdARGMREVvhg6V3uSVolodoE"
+

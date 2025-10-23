@@ -37,13 +37,18 @@ Operation action: {action}
 
 ### Analysis Requirements ###
 Compare the screenshots before and after the operation. Focus on:
-1. Whether the screen content changed as expected based on the operation thought
-2. Whether the operation action produced the intended result
-3. Whether any unexpected changes occurred
+1. **URL Change (for web platforms)**: If the additional_info contains a "Current Page URL", check if the URL changed as expected. For navigation actions (like clicking a link), a URL change is a strong indicator of success, even if screenshots look similar.
+2. **Screen Content**: Whether the screen content changed as expected based on the operation thought
+3. **Operation Result**: Whether the operation action produced the intended result
+4. **Unexpected Changes**: Whether any unexpected changes occurred
+
+### Important Notes ###
+- For **web navigation actions** (clicking links, submitting forms), prioritize URL changes over visual changes. Screenshots may look similar (e.g., both are search result pages), but a URL change indicates successful navigation.
+- For **element interaction actions** (filling forms, clicking buttons on the same page), focus more on visual changes and element states.
 
 ### Output format ###
 ### Thought ###
-Your analysis of the changes between the two screenshots and whether they match the expected outcome.
+Your analysis of the changes between the two screenshots and whether they match the expected outcome. **For web platforms, always mention the URL if provided.**
 
 ### Answer ###
 CORRECT: If the operation produced the expected result

@@ -443,6 +443,13 @@ Use precise CSS/text locators when possible. Prefer deterministic selection over
 If an element is out of view, scroll it into view first. When in doubt, use locator(...).scroll_into_view_if_needed().
 Use small, sequential actions; avoid long chains that may fail mid-way.
 If the previous action was a SUCCESSFUL Tell, the task is complete and you MUST use Stop in the current step. Do not attempt another Tell.
+
+IMPORTANT Playwright Syntax Rules:
+- .first, .last, .nth(n) are PROPERTIES, not methods. DO NOT add parentheses.
+  ✅ CORRECT:   self.page.locator("text=北京").first.click()
+  ❌ INCORRECT: self.page.locator("text=北京").first().click()  # This will cause "'Locator' object is not callable" error
+- When multiple elements match, use .first or .nth(0) to select the first one.
+- Do NOT use pyautogui or coordinate-based clicking for web elements. Always use Playwright locators.
         """
 
         # Playwright-specific task requirements
@@ -455,6 +462,7 @@ In order to meet the user's requirements on a web page, you must select ONE of t
     Common operations:
     - self.page.goto(url)
     - self.page.locator(selector).click()
+    - self.page.locator(selector).first.click()  # Select first when multiple elements match (NO parentheses)
     - self.page.locator(selector).fill(\"\"\"text\"\"\")
     - self.page.keyboard.press("Enter")
     - self.page.mouse.wheel(0, 800)  # scroll down

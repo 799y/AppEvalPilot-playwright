@@ -1,12 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-@Time    : 2025/02/12
-@Author  : tanghaoming
-@File    : device_controller.py
-@Desc    : Device control utility class for operating Android and PC devices
-"""
-
 import re
 import shlex
 import shutil
@@ -20,7 +11,6 @@ from contextlib import suppress
 import pyautogui
 import pyperclip
 import uiautomator2 as u2
-
 # from metagpt.logs import logger
 from loguru import logger
 
@@ -48,9 +38,12 @@ try:
 except Exception:  # pragma: no cover - absence on non-Linux
     _HAS_PYATSPI = False
 
-with suppress(Exception):
-    # Optional import; only required for Playwright platform
+# Playwright imports (optional, only required for web automation)
+try:
     from playwright.async_api import async_playwright
+    _HAS_PLAYWRIGHT = True
+except Exception:  # pragma: no cover - absence on non-web platforms
+    _HAS_PLAYWRIGHT = False
 
 
 class BaseController:
@@ -277,63 +270,333 @@ class AndroidController(BaseController):
 
         return modified_code
 
-
 class PlaywrightController(BaseController):
     """Playwright async controller.
-
+    
     NOTE: Must be used with await from asyncio context.
+    Requires playwright to be installed: pip install playwright
     """
 
     def __init__(self, cdp_url: str = "http://localhost:9222"):
+        """Initialize controller configuration.
+        
+        Args:
+            cdp_url: Chrome DevTools Protocol URL for connecting to existing browser
+        
+        Raises:
+            ImportError: If playwright is not installed
+        """
+        if not _HAS_PLAYWRIGHT:
+            raise ImportError(
+                "Playwright is not available. "
+                "Install it with: pip install playwright && playwright install chromium"
+            )
+        
         self.cdp_url = cdp_url
         self._pw = None
         self.browser = None
         self.context = None
         self.page = None
+        self._initialized = False
+        self._lock = None
 
     async def initialize(self):
-        try:
-            if 'async_playwright' not in globals() and 'async_playwright' not in locals():
-                raise ImportError("playwright is not installed")
-            self._pw = await async_playwright().start()
+        """Initialize Playwright browser connection (idempotent).
+        
+        This method can be safely called multiple times.
+        First call performs initialization, subsequent calls are no-ops.
+        
+        Raises:
+            ImportError: If playwright is not installed
+            RuntimeError: If initialization fails
+        """
+        # 幂等性检查
+        if self._initialized and self.page is not None:
+            logger.info("Playwright already initialized, skipping")
+            return
+        
+        # 并发控制
+        if self._lock is None:
+            import asyncio
+            self._lock = asyncio.Lock()
+        
+        async with self._lock:
+            # 双重检查锁定
+            if self._initialized and self.page is not None:
+                return
+            
             try:
-                self.browser = await self._pw.chromium.connect_over_cdp(self.cdp_url)
-                contexts = self.browser.contexts
-                if contexts:
-                    self.context = contexts[0]
-                    pages = self.context.pages
-                    self.page = next((pg for pg in pages if not pg.url.startswith("devtools://")), pages[0] if pages else await self.context.new_page())
-                else:
-                    self.context = await self.browser.new_context()
-                    self.page = await self.context.new_page()
-                logger.info("Connected to existing Chrome via CDP for Playwright controller (async)")
+                # 启动Playwright
+                logger.info("Starting Playwright...")
+                self._pw = await async_playwright().start()
+                
+                # 初始化浏览器
+                await self._initialize_browser()
+                
+                # 标记已初始化
+                self._initialized = True
+                logger.info(f"Playwright initialized successfully, page URL: {self.page.url}")
+                
             except Exception as e:
-                logger.warning(f"CDP connect failed, launching new Chromium (async): {e}")
-                self.browser = await self._pw.chromium.launch(headless=False)
-                self.context = await self.browser.new_context()
-                self.page = await self.context.new_page()
+                logger.error(f"Failed to initialize Playwright: {str(e)}")
+                # 清理已创建的资源
+                await self._cleanup_resources()
+                raise RuntimeError(f"Playwright initialization failed: {str(e)}") from e
+
+    async def _initialize_browser(self):
+        """Initialize browser connection via CDP or launch new instance.
+        
+        Raises:
+            Exception: If browser initialization fails
+        """
+        # 尝试通过CDP连接现有Chrome
+        try:
+            logger.info(f"Attempting to connect via CDP to {self.cdp_url}")
+            self.browser = await self._pw.chromium.connect_over_cdp(self.cdp_url)
+            
+            # 获取或创建context
+            contexts = self.browser.contexts
+            if contexts:
+                self.context = contexts[0]
+                logger.info(f"Using existing context with {len(self.context.pages)} pages")
+            else:
+                logger.info("Creating new context in existing browser")
+                self.context = await self.browser.new_context(
+                    viewport={'width': 1920, 'height': 1080},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                )
+            
+            # 获取或创建page
+            self.page = await self._get_or_create_page()
+            
+            # 如果页面是空白或 about:blank，导航到百度
+            try:
+                current_url = self.page.url
+                logger.info(f"Current page URL: {current_url}")
+                if not current_url or current_url == "about:blank" or current_url.startswith("chrome://"):
+                    logger.info("Page is blank, attempting to navigate to Baidu...")
+                    await self.page.goto("https://www.baidu.com", wait_until="domcontentloaded", timeout=30000)
+                else:
+                    logger.info("Page already has content, skipping navigation to Baidu")
+            except Exception as e:
+                logger.error(f"❌ Navigation to Baidu failed: {e}")
+            
+            logger.info(f"Connected to existing Chrome via CDP")
+            
         except Exception as e:
-            logger.error(f"Failed to initialize Playwright controller (async): {str(e)}")
-            raise
+            logger.warning(f"CDP connection failed: {e}")
+            logger.info("Launching new Chromium instance...")
+            
+            # 清理失败的连接
+            if self.browser:
+                try:
+                    await self.browser.close()
+                except Exception:
+                    pass
+                finally:
+                    self.browser = None
+                    self.context = None
+            
+            # 启动新的Chromium实例
+            self.browser = await self._pw.chromium.launch(
+                headless=False,
+                args=['--start-maximized', '--disable-blink-features=AutomationControlled']
+            )
+            self.context = await self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                no_viewport=True
+            )
+            self.page = await self.context.new_page()
+            
+            # 默认导航到百度首页
+            logger.info("Attempting to navigate to Baidu homepage...")
+            try:
+                await self.page.goto("https://www.baidu.com", wait_until="domcontentloaded", timeout=30000)
+                logger.info(f"✅ Successfully navigated to Baidu homepage: {self.page.url}")
+            except Exception as e:
+                logger.error(f"❌ Failed to navigate to Baidu: {e}")
+                logger.warning("Browser will start with blank page")
+            
+            logger.info("New Chromium instance launched successfully")
+
+    async def _get_or_create_page(self):
+        """Get an existing non-devtools page or create a new one.
+        
+        Returns:
+            Page: A valid Playwright page object
+        """
+        pages = self.context.pages
+        
+        # 查找第一个非devtools和非chrome内部页面
+        for page in pages:
+            try:
+                url = page.url
+                if not url.startswith("devtools://") and not url.startswith("chrome://"):
+                    logger.info(f"Using existing page: {url}")
+                    return page
+            except Exception as e:
+                logger.debug(f"Error checking page URL: {e}")
+                continue
+        
+        # 如果没有找到合适的页面，创建新页面
+        logger.info("No suitable existing page found, creating new page")
+        return await self.context.new_page()
+
+    async def _cleanup_resources(self):
+        """Clean up all Playwright resources.
+        
+        This method is called when initialization fails or during explicit cleanup.
+        """
+        logger.debug("Cleaning up Playwright resources...")
+        
+        # 清理page
+        if self.page:
+            try:
+                await self.page.close()
+            except Exception as e:
+                logger.debug(f"Error closing page: {e}")
+            finally:
+                self.page = None
+        
+        # 清理context
+        if self.context:
+            try:
+                await self.context.close()
+            except Exception as e:
+                logger.debug(f"Error closing context: {e}")
+            finally:
+                self.context = None
+        
+        # 清理browser
+        if self.browser:
+            try:
+                await self.browser.close()
+            except Exception as e:
+                logger.debug(f"Error closing browser: {e}")
+            finally:
+                self.browser = None
+        
+        # 清理playwright
+        if self._pw:
+            try:
+                await self._pw.stop()
+            except Exception as e:
+                logger.debug(f"Error stopping playwright: {e}")
+            finally:
+                self._pw = None
+        
+        self._initialized = False
+        logger.debug("Playwright resources cleaned up")
 
     async def async_get_screenshot(self, filepath: str) -> None:
+        """Take a screenshot of the current page.
+        
+        Args:
+            filepath: Path where screenshot will be saved
+            
+        Raises:
+            RuntimeError: If page is not initialized
+        """
         if not self.page:
-            raise RuntimeError("Playwright page is not initialized")
-        await self.page.screenshot(path=filepath)
+            raise RuntimeError("Playwright page is not initialized. Call initialize() first.")
+        
+        try:
+            await self.page.screenshot(path=filepath, full_page=False)
+            logger.debug(f"Screenshot saved to {filepath}")
+        except Exception as e:
+            logger.error(f"Failed to take screenshot: {e}")
+            raise
 
-    async def async_goto(self, url: str) -> None:
+    async def async_goto(self, url: str, wait_until: str = "domcontentloaded") -> None:
+        """Navigate to a URL.
+        
+        Args:
+            url: The URL to navigate to
+            wait_until: When to consider navigation succeeded. Options:
+                       'load', 'domcontentloaded', 'networkidle', 'commit'
+                       
+        Raises:
+            RuntimeError: If page is not initialized
+        """
         if not self.page:
-            raise RuntimeError("Playwright page is not initialized")
-        await self.page.goto(url)
+            raise RuntimeError("Playwright page is not initialized. Call initialize() first.")
+        
+        try:
+            logger.info(f"Navigating to {url}")
+            await self.page.goto(url, wait_until=wait_until, timeout=30000)
+            logger.info(f"Successfully navigated to {url}")
+        except Exception as e:
+            logger.error(f"Failed to navigate to {url}: {e}")
+            raise
+
+    async def get_current_url(self) -> str:
+        """Get the current page URL.
+        
+        Returns:
+            str: Current URL or empty string if page is not initialized
+        """
+        if not self.page:
+            logger.warning("Playwright page is not initialized")
+            return ""
+        
+        try:
+            url = self.page.url
+            logger.debug(f"Current URL: {url}")
+            return url
+        except Exception as e:
+            logger.error(f"Failed to get current URL: {e}")
+            return ""
 
     async def arun_action(self, action: str) -> None:
+        """Execute a Playwright action from LLM-generated code.
+        
+        Args:
+            action: Action string containing Python code to execute
+            
+        Raises:
+            RuntimeError: If page is not initialized or code execution fails
+        """
+        if not self.page:
+            raise RuntimeError("Playwright page is not initialized. Call initialize() first.")
+        
         raw = self._extract_code(action)
         logger.info(f"Executing async code: {raw}")
 
-        # Normalize into lines and auto-insert 'await' for common Playwright calls if missing
+        # 安全检查
+        if not self._is_code_safe(raw):
+            raise ValueError(f"Unsafe code detected in action: {raw}")
+
+        # 规范化代码并自动添加await
         statements = [s.strip() for s in raw.split(";") if s.strip()]
         awaited_lines = []
-        keywords = ("goto(", "locator(", ".click(", ".fill(", ".press(", ".wheel(", ".screenshot(")
+        # Playwright 异步方法关键字（需要自动添加 await）
+        keywords = (
+            # 导航相关
+            "goto(", ".reload(", ".go_back(", ".go_forward(",
+            # 元素定位
+            "locator(",
+            # 鼠标操作
+            ".click(", ".dblclick(", ".hover(", ".tap(",
+            # 拖拽操作
+            ".drag_to(", ".drag_and_drop(",
+            # 输入操作
+            ".fill(", ".type(", ".clear(", ".input_value(",
+            # 键盘操作
+            ".press(", ".select_text(",
+            # 表单操作
+            ".check(", ".uncheck(", ".select_option(", ".set_checked(",
+            # 滚动操作
+            ".wheel(", ".scroll_into_view_if_needed(",
+            # 等待操作
+            ".wait_for_load_state(", ".wait_for_selector(", ".wait_for_timeout(",
+            # 截图和其他
+            ".screenshot(", ".evaluate(", ".evaluate_handle(",
+            # Frame 操作
+            ".frame(", ".frame_locator(",
+            # 获取属性
+            ".get_attribute(", ".text_content(", ".inner_text(",
+            ".is_visible(", ".is_enabled(", ".is_checked("
+        )
         
         for stmt in statements:
             s = stmt
@@ -347,98 +610,446 @@ class PlaywrightController(BaseController):
                 s = "await " + s
             awaited_lines.append(s)
 
-        # Wrap into async function body
+        # 包装成异步函数
         func_code = (
             "async def __runner(self, page):\n"
             + "    import asyncio, time\n"
             + "\n".join(["    " + line for line in awaited_lines])
             + "\n"
         )
-        local_env = {}
-        exec(func_code, {}, local_env)
-        await local_env["__runner"](self, self.page)
+        
+        try:
+            # 记录执行前的页面数量和当前页面
+            import asyncio
+            old_pages_count = len(self.context.pages)
+            old_page_url = self.page.url
+            
+            local_env = {}
+            # 限制可用的全局变量（允许基本的 import 和常用函数）
+            safe_globals = {
+                '__builtins__': {
+                    '__import__': __import__,  # 允许 import 语句（受 _is_code_safe 限制）
+                    # 基本类型
+                    'range': range,
+                    'len': len,
+                    'int': int,
+                    'str': str,
+                    'float': float,
+                    'bool': bool,
+                    'list': list,
+                    'dict': dict,
+                    'tuple': tuple,
+                    'set': set,
+                    # 数学运算
+                    'min': min,
+                    'max': max,
+                    'abs': abs,
+                    'round': round,
+                    'sum': sum,
+                    'pow': pow,
+                    # 字符串和迭代
+                    'enumerate': enumerate,
+                    'zip': zip,
+                    'map': map,
+                    'filter': filter,
+                    'sorted': sorted,
+                    'reversed': reversed,
+                    # 类型检查
+                    'isinstance': isinstance,
+                    'type': type,
+                    'hasattr': hasattr,
+                    'getattr': getattr,
+                    # 调试
+                    'print': print,
+                }
+            }
+            exec(func_code, safe_globals, local_env)
+            
+            # 添加超时保护
+            await asyncio.wait_for(
+                local_env["__runner"](self, self.page),
+                timeout=60.0  # 60秒超时
+            )
+            
+            # 检查是否打开了新标签页
+            await asyncio.sleep(0.5)  # 等待新页面加载
+            new_pages_count = len(self.context.pages)
+            
+            if new_pages_count > old_pages_count:
+                # 有新标签页打开，切换到最新的页面
+                new_page = self.context.pages[-1]
+                logger.info(f"🔄 Detected new tab opened. Switching from '{old_page_url}' to '{new_page.url}'")
+                self.page = new_page
+                # 等待新页面加载完成
+                try:
+                    await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
+                    logger.info(f"✅ Successfully switched to new tab: {self.page.url}")
+                except Exception as e:
+                    logger.warning(f"New page load wait timeout (this might be normal): {e}")
+            
+        except asyncio.TimeoutError:
+            logger.error("Action execution timeout (60s)")
+            raise RuntimeError("Action execution timeout")
+        except Exception as e:
+            logger.error(f"Action execution failed: {e}")
+            raise
+
+    def _is_code_safe(self, code: str) -> bool:
+        """Check if code is safe to execute.
+        
+        Args:
+            code: Code string to validate
+            
+        Returns:
+            bool: True if code appears safe, False otherwise
+        """
+        # 检查危险的操作
+        dangerous_patterns = [
+            'import os', 'import sys', 'import subprocess',
+            '__import__', 'eval(', 'exec(',
+            'open(', 'file(', 'input(',
+            'compile(', '__builtins__'
+        ]
+        
+        code_lower = code.lower()
+        for pattern in dangerous_patterns:
+            if pattern.lower() in code_lower:
+                logger.warning(f"Dangerous pattern detected: {pattern}")
+                return False
+        
+        return True
 
     async def aclose(self):
-        with suppress(Exception):
-            if self.context:
-                await self.context.close()
-        with suppress(Exception):
-            if self.browser:
-                await self.browser.close()
-        with suppress(Exception):
-            if self._pw:
-                await self._pw.stop()
+        """Close all Playwright resources gracefully.
+        
+        This method should be called when done with the controller.
+        """
+        logger.info("Closing Playwright controller...")
+        
+        errors = []
+        
+        # 关闭context
+        if self.context:
+            try:
+                import asyncio
+                await asyncio.wait_for(self.context.close(), timeout=5.0)
+                logger.debug("Context closed")
+            except asyncio.TimeoutError:
+                logger.warning("Context close timeout")
+            except Exception as e:
+                logger.error(f"Error closing context: {e}")
+                errors.append(e)
+            finally:
+                self.context = None
+        
+        # 关闭browser
+        if self.browser:
+            try:
+                import asyncio
+                await asyncio.wait_for(self.browser.close(), timeout=5.0)
+                logger.debug("Browser closed")
+            except asyncio.TimeoutError:
+                logger.warning("Browser close timeout")
+            except Exception as e:
+                logger.error(f"Error closing browser: {e}")
+                errors.append(e)
+            finally:
+                self.browser = None
+        
+        # 停止playwright
+        if self._pw:
+            try:
+                import asyncio
+                await asyncio.wait_for(self._pw.stop(), timeout=5.0)
+                logger.debug("Playwright stopped")
+            except asyncio.TimeoutError:
+                logger.warning("Playwright stop timeout")
+            except Exception as e:
+                logger.error(f"Error stopping playwright: {e}")
+                errors.append(e)
+            finally:
+                self._pw = None
+        
+        self._initialized = False
+        self.page = None
+        
+        if errors:
+            logger.warning(f"Encountered {len(errors)} errors during cleanup")
+        else:
+            logger.info("Playwright controller closed successfully")
 
-    async def async_get_dom_infos(self, location_info: str = "center", max_nodes: int = 400) -> List[Dict]:
-        """Collect DOM element infos from the current page for perception.
-        Returns a list of dicts with keys: 'coordinates' and 'text'.
-        Coordinates follow location_info: 'center' -> [x,y], 'bbox' -> [x1,y1,x2,y2].
+    async def get_screen_xml(self, location_info: str = "center", max_nodes: int = 400) -> List[Dict]:
+        """Get screen XML/DOM information (async method for Playwright).
+        
+        Note:
+            This is an async method. Must be called with await.
+        Args:
+            location_info: 'center' returns [x,y], 'bbox' returns [x1,y1,x2,y2]
+            max_nodes: Maximum number of nodes to collect
+        Returns:
+            List of dicts with keys 'coordinates' and 'text'
+            
+        Raises:
+            RuntimeError: If page is not initialized
         """
         if not self.page:
+            logger.warning("Playwright page is not initialized")
             return []
-        # Evaluate in page context to collect visible elements and their client rects
-        script = (
-            "() => {\n"
-            "  const isVisible = (el) => {\n"
-            "    const style = window.getComputedStyle(el);\n"
-            "    const rect = el.getBoundingClientRect();\n"
-            "    if (!rect || rect.width === 0 || rect.height === 0) return false;\n"
-            "    if (style.visibility === 'hidden' || style.display === 'none' || parseFloat(style.opacity||'1') === 0) return false;\n"
-            "    return true;\n"
-            "  };\n"
-            "  const nodes = Array.from(document.querySelectorAll('*')).slice(0, "
-            + str(max_nodes)
-            + ");\n"
-            "  const out = [];\n"
-            "  for (const el of nodes) {\n"
-            "    try {\n"
-            "      if (!isVisible(el)) continue;\n"
-            "      const rect = el.getBoundingClientRect();\n"
-            "      const x1 = Math.max(0, Math.round(rect.left));\n"
-            "      const y1 = Math.max(0, Math.round(rect.top));\n"
-            "      const x2 = Math.max(0, Math.round(rect.right));\n"
-            "      const y2 = Math.max(0, Math.round(rect.bottom));\n"
-            "      const cx = Math.round((x1 + x2) / 2);\n"
-            "      const cy = Math.round((y1 + y2) / 2);\n"
-            "      const role = (el.getAttribute('role')||'');\n"
-            "      const name = (el.getAttribute('name')||'');\n"
-            "      const id = (el.id||'');\n"
-            "      const cls = (el.className||'');\n"
-            "      const txt = (el.innerText||'').trim().slice(0, 120);\n"
-            "      out.push({ bbox: [x1,y1,x2,y2], center: [cx,cy], meta: { tag: el.tagName, role, id, cls, name, txt } });\n"
-            "    } catch(_){}\n"
-            "    if (out.length >= "
-            + str(max_nodes)
-            + ") break;\n"
-            "  }\n"
-            "  return out;\n"
-            "}"
-        )
+        
+        # ==================== 方法：使用 query_selector_all（原生 Playwright API）====================
         try:
-            dom_nodes = await self.page.evaluate(script)
-        except Exception as e:
-            logger.warning(f"DOM evaluate failed: {e}")
-            return []
+            # 获取所有交互元素和有意义的元素
+            selectors = [
+                'button', 'a', 'input', 'select', 'textarea',  # 表单和链接
+                '[role="button"]', '[role="link"]', '[role="textbox"]', '[role="search"]',  # ARIA 角色
+                '[onclick]', '[href]', '[tabindex]',  # 可交互元素
+                'h1', 'h2', 'h3', 'h4', 'h5', 'h6',  # 标题
+                'p', 'span', 'div',  # 文本容器（保留 div，后续智能过滤）
+                'img', 'svg',  # 图片和图标
+                'label', 'li'  # 标签和列表项
+            ]
+            
+            # 合并选择器
+            combined_selector = ', '.join(selectors)
+            elements = await self.page.query_selector_all(combined_selector)
+            
+            results = []
+            processed_count = 0
+            seen_elements = set()  # 用于去重：存储元素指纹
+            
+            # def create_element_fingerprint(text: str, tag: str, role: str, elem_id: str, elem_class: str, coords: list) -> str:
+            #     """创建元素指纹用于去重
+                
+            #     策略：
+            #     1. 优先使用 id（唯一标识）
+            #     2. 如果有文本，只使用文本内容（忽略标签，避免嵌套元素重复）
+            #     3. 如果是交互元素，使用 role + class 组合
+            #     4. 其他情况：返回 None，不去重
+            #     """
+            #     # 策略1: 如果有唯一ID，直接使用
+            #     if elem_id:
+            #         return f"id:{elem_id}"
+                
+            #     # 策略2: 如果有文本内容，只使用文本（忽略标签）
+            #     # 这样可以过滤 <p>text</p> 和 <a>text</a> 这种嵌套重复
+            #     text_stripped = text.strip()
+            #     if text_stripped:
+            #         # 对于长文本，只取前50个字符作为指纹
+            #         text_key = text_stripped[:50] if len(text_stripped) > 50 else text_stripped
+            #         return f"text:{text_key}"
+                
+            #     # 策略3: 无文本但有角色，使用 role + class 组合
+            #     if role:
+            #         return f"role:{role}|class:{elem_class}"
+                
+            #     # 策略4: 其他情况（无id、无text、无role的元素）
+            #     # 不去重，使用唯一标识（坐标）确保每个都保留
+            #     coord_str = f"{coords[0]},{coords[1]}" if len(coords) >= 2 else "0,0"
+            #     return f"unique:{coord_str}|{tag}|{elem_class}"
+            
+            def create_element_fingerprint(text: str, tag: str, role: str, elem_id: str, elem_class: str, coords: list) -> str:
+                """创建元素指纹用于去重"""
+                # 策略1: ID 优先，ID是唯一的
+                if elem_id:
+                    return f"id:{elem_id}"
+                
+                # --- 新增：坐标分桶 ---
+                # 定义一个“桶”的大小，例如 50x50 像素
+                # 坐标 [100, 100] 和 [105, 105] 都会落入同一个桶
+                # 坐标 [100, 100] 和 [500, 500] 会落入不同的桶
+                bin_size = 50 
+                coord_bin_x = int(coords[0] / bin_size) if len(coords) >= 2 else 0
+                coord_bin_y = int(coords[1] / bin_size) if len(coords) >= 2 else 0
+                # bin_key 现在是元素的大致位置
+                bin_key = f"bin:{coord_bin_x},{coord_bin_y}"
+                # ----------------------
 
-        results: List[Dict] = []
-        for node in dom_nodes or []:
-            bbox = node.get("bbox") or [0, 0, 0, 0]
-            center = node.get("center") or [0, 0]
-            meta = node.get("meta") or {}
-            if location_info == "bbox":
-                coords = bbox
-            else:
-                coords = center
-            # Build concise text line similar to PC/Android XML entries
-            tag = meta.get("tag", "")
-            role = meta.get("role", "")
-            eid = meta.get("id", "")
-            cls = meta.get("cls", "")
-            name = meta.get("name", "")
-            txt = meta.get("txt", "")
-            text_line = f"tag={tag}; role={role}; id={eid}; class={cls}; name={name}; text={txt}"
-            results.append({"coordinates": coords, "text": text_line})
-        return results
+                # 策略2: 文本 + 坐标桶
+                text_stripped = text.strip()
+                if text_stripped:
+                    text_key = text_stripped[:50] if len(text_stripped) > 50 else text_stripped
+                    # 指纹现在包含内容和位置
+                    return f"text:{text_key}|{bin_key}"
+                
+                # 策略3: 角色 + 坐标桶 (适用于无文本的图标按钮)
+                if role:
+                    # 指纹现在包含内容和位置
+                    return f"role:{role}|{bin_key}"
+                
+                # 策略4: 标签 + 坐标桶 (最后的防线，取代你原来的策略4)
+                return f"tag:{tag}|{bin_key}"
+            for elem in elements:
+                if processed_count >= max_nodes:
+                    break
+                
+                try:
+                    # 检查可见性
+                    is_visible = await elem.is_visible()
+                    if not is_visible:
+                        continue
+                    
+                    # 获取边界框
+                    bbox = await elem.bounding_box()
+                    if not bbox:
+                        continue
+                    
+                    # 一次性获取元素所有信息（减少调用次数）
+                    info = await elem.evaluate('''
+                        el => ({
+                            tag: el.tagName,
+                            text: (el.innerText || el.textContent || '').trim().slice(0, 120),
+                            role: el.getAttribute('role') || '',
+                            id: el.id || '',
+                            class: (el.className || '').toString().slice(0, 50),
+                            name: el.getAttribute('name') || '',
+                            hasOnclick: el.hasAttribute('onclick'),
+                            childCount: el.children.length,
+                            // 获取直接子元素的文本长度
+                            childTextLength: Array.from(el.children).reduce((sum, child) => 
+                                sum + (child.innerText || child.textContent || '').trim().length, 0)
+                        })
+                    ''')
+                    
+                    # 跳过空文本的非交互元素（减少噪音）
+                    if not info['text'] and not info['id'] and not info['role'] and info['tag'] in ('SPAN', 'IMG', 'SVG'):
+                        continue
+                    
+                    # DIV 特殊处理：只保留有意义的 DIV
+                    if info['tag'] == 'DIV':
+                        # 条件1: 有 ID 或 role（可能是交互元素）
+                        has_identity = bool(info['id'] or info['role'])
+                        
+                        # 条件2: 有 onclick（可交互）
+                        is_interactive = info.get('hasOnclick', False)
+                        
+                        # 条件3: 有独立文本内容
+                        # 如果 DIV 的文本长度 > 子元素的文本长度，说明 DIV 本身有独立文本
+                        # 如果没有子元素但有文本，也保留
+                        has_own_text = False
+                        if info['text']:
+                            text_len = len(info['text'])
+                            child_text_len = info.get('childTextLength', 0)
+                            child_count = info.get('childCount', 0)
+                            # 如果没有子元素，或者文本明显多于子元素，保留
+                            has_own_text = (child_count == 0) or (text_len > child_text_len + 5)
+                        
+                        # 只有满足以上任一条件，才保留 DIV
+                        if not (has_identity or is_interactive or has_own_text):
+                            continue
+                    
+                    # 计算坐标
+                    if location_info == "center":
+                        coords = [
+                            int(bbox['x'] + bbox['width'] / 2),
+                            int(bbox['y'] + bbox['height'] / 2)
+                        ]
+                    else:  # bbox
+                        coords = [
+                            int(bbox['x']), 
+                            int(bbox['y']),
+                            int(bbox['x'] + bbox['width']),
+                            int(bbox['y'] + bbox['height'])
+                        ]
+                    
+                    # 基于内容的去重：创建元素指纹
+                    fingerprint = create_element_fingerprint(
+                        info['text'], 
+                        info['tag'], 
+                        info['role'], 
+                        info['id'], 
+                        info['class'],
+                        coords
+                    )
+                    
+                    # 检查是否重复
+                    if fingerprint in seen_elements:
+                        continue
+                    
+                    seen_elements.add(fingerprint)
+                    
+                    # 构建文本信息
+                    text_line = f"text={info['text']}; tag={info['tag']}; role={info['role']}; id={info['id']}; class={info['class']}; name={info['name']}"
+                    
+                    results.append({"coordinates": coords, "text": text_line})
+                    processed_count += 1
+                    
+                except Exception as e:
+                    logger.debug(f"Error processing element: {e}")
+                    continue
+            
+            logger.info(f"Collected {len(results)} DOM elements (content-based deduplication) using native Playwright API")
+            return results
+            
+        except Exception as e:
+            logger.error(f"Failed to get DOM elements: {e}")
+            return []
+        # # 构建JavaScript脚本
+        # script = (
+        #     "() => {\n"
+        #     "  const isVisible = (el) => {\n"
+        #     "    const style = window.getComputedStyle(el);\n"
+        #     "    const rect = el.getBoundingClientRect();\n"
+        #     "    if (!rect || rect.width === 0 || rect.height === 0) return false;\n"
+        #     "    if (style.visibility === 'hidden' || style.display === 'none' || parseFloat(style.opacity||'1') === 0) return false;\n"
+        #     "    return true;\n"
+        #     "  };\n"
+        #     "  const nodes = Array.from(document.querySelectorAll('*')).slice(0, "
+        #     + str(max_nodes)
+        #     + ");\n"
+        #     "  const out = [];\n"
+        #     "  for (const el of nodes) {\n"
+        #     "    try {\n"
+        #     "      if (!isVisible(el)) continue;\n"
+        #     "      const rect = el.getBoundingClientRect();\n"
+        #     "      const x1 = Math.max(0, Math.round(rect.left));\n"
+        #     "      const y1 = Math.max(0, Math.round(rect.top));\n"
+        #     "      const x2 = Math.max(0, Math.round(rect.right));\n"
+        #     "      const y2 = Math.max(0, Math.round(rect.bottom));\n"
+        #     "      const cx = Math.round((x1 + x2) / 2);\n"
+        #     "      const cy = Math.round((y1 + y2) / 2);\n"
+        #     "      const role = (el.getAttribute('role')||'');\n"
+        #     "      const name = (el.getAttribute('name')||'');\n"
+        #     "      const id = (el.id||'');\n"
+        #     "      const cls = (el.className||'').toString().slice(0, 50);\n"
+        #     "      const txt = (el.innerText||'').trim().slice(0, 120);\n"
+        #     "      out.push({ bbox: [x1,y1,x2,y2], center: [cx,cy], meta: { tag: el.tagName, role, id, cls, name, txt } });\n"
+        #     "    } catch(_){}\n"
+        #     "    if (out.length >= "
+        #     + str(max_nodes)
+        #     + ") break;\n"
+        #     "  }\n"
+        #     "  return out;\n"
+        #     "}"
+        # )
+        # 
+        # try:
+        #     dom_nodes = await self.page.evaluate(script)
+        # except Exception as e:
+        #     logger.warning(f"DOM evaluate failed: {e}")
+        #     return []
+        #
+        # results: List[Dict] = []
+        # for node in dom_nodes or []:
+        #     bbox = node.get("bbox") or [0, 0, 0, 0]
+        #     center = node.get("center") or [0, 0]
+        #     meta = node.get("meta") or {}
+        #     
+        #     # 根据location_info选择坐标格式
+        #     coords = bbox if location_info == "bbox" else center
+        #     
+        #     # 构建文本信息
+        #     tag = meta.get("tag", "")
+        #     role = meta.get("role", "")
+        #     eid = meta.get("id", "")
+        #     cls = meta.get("cls", "")
+        #     name = meta.get("name", "")
+        #     txt = meta.get("txt", "")
+        #     
+        #     text_line = f"tag={tag}; role={role}; id={eid}; class={cls}; name={name}; text={txt}"
+        #     results.append({"coordinates": coords, "text": text_line})
+        # 
+        # logger.info(f"Collected {len(results)} DOM elements")
+        # return results
 
 
 class PCController(BaseController):

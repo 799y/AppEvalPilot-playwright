@@ -24,6 +24,7 @@ from appeval.actions.screen_info_extractor import ScreenInfoExtractor
 from appeval.prompts.osagent import ActionPromptContext, Android_prompt, PC_prompt, Playwright_prompt
 from appeval.tools.chrome_debugger import ChromeDebugger
 from appeval.tools.device_controller import ControllerTool
+
 from appeval.tools.icon_detect import IconDetectTool
 from appeval.tools.ocr import OCRTool
 
@@ -431,7 +432,7 @@ class OSAgent(Role):
             tuple: Tuple containing perception information list, image width, image height and output image path.
         """
         # Get screen screenshot
-        if getattr(self, "platform", None) == "Playwright" and hasattr(self.controller, "async_get_screenshot"):
+        if getattr(self, "platform", None) == "Playwright":
             await self.controller.async_get_screenshot(screenshot_file)
         else:
             self.controller.get_screenshot(screenshot_file)
@@ -510,17 +511,17 @@ class OSAgent(Role):
 
         # If extend_xml_infos is enabled, then get structured element information
         if self.extend_xml_infos:
-            if self.platform in ["Android", "Windows", "Linux"]:
-                xml_results = self.controller.get_screen_xml(self.location_info)
-                logger.debug(xml_results)
-                perception_infos.extend(xml_results)
-            elif self.platform == "Playwright" and hasattr(self.controller, "async_get_dom_infos"):
-                try:
-                    dom_results = await self.controller.async_get_dom_infos(self.location_info)
-                    logger.debug(dom_results)
-                    perception_infos.extend(dom_results)
-                except Exception as e:
-                    logger.warning(f"Playwright DOM info collection failed: {e}")
+            try:
+                # All platforms use get_screen_xml (Playwright is async(and dom not xml), others are sync)
+                if self.platform == "Playwright":
+                    screen_elements = await self.controller.get_screen_xml(self.location_info)
+                else:
+                    screen_elements = self.controller.get_screen_xml(self.location_info)
+                
+                logger.debug(screen_elements)
+                perception_infos.extend(screen_elements)
+            except Exception as e:
+                logger.warning(f"Screen elements collection failed on {self.platform}: {e}")
 
         return perception_infos, width, height, output_image_path
 
@@ -811,7 +812,7 @@ class OSAgent(Role):
         else:
             # Execute other actions
             try:
-                if self.platform == "Playwright" and hasattr(self.controller, "arun_action"):
+                if self.platform == "Playwright":
                     await self.controller.arun_action(self.rc.action)
                 elif self.platform in ["Android", "Windows", "Linux"]:
                     self.controller.run_action(self.rc.action)
@@ -856,6 +857,17 @@ class OSAgent(Role):
             self.rc.error_flag = True
 
         elif self.use_reflection:
+            # Prepare additional info for Playwright (URL changes)
+            add_info_with_url = self.add_info
+            if self.platform == "Playwright":
+                try:
+                    current_url = await self.controller.get_current_url()
+                    if current_url:
+                        add_info_with_url = f"{self.add_info}\n\n### Current Page URL ###\n{current_url}"
+                        logger.info(f"Adding URL to reflection context: {current_url}")
+                except Exception as e:
+                    logger.warning(f"Failed to get current URL for reflection: {e}")
+            
             # Execute reflection
             reflect, self.rc.reflection_thought = await self._reflection(
                 self.instruction,
@@ -865,7 +877,7 @@ class OSAgent(Role):
                 self.height,
                 self.rc.summary,
                 self.rc.action,
-                self.add_info,
+                add_info_with_url,
                 self.last_screenshot_file,
                 self.screenshot_file,
             )

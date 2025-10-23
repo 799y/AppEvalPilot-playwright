@@ -1,11 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-@Time    : 2025/03/11
-@Author  : tanghaoming
-@File    : run_osagent.py
-@Desc    : OSAgent demo script
-"""
 import argparse
 import asyncio
 from pathlib import Path
@@ -63,15 +55,15 @@ def main():
 
     # Basic configuration parameters
     parser.add_argument(
-        "--platform", type=str, default="Windows", help="Operating system type (Windows, Mac, or Android)"
+        "--platform", type=str, default="Playwright", help="Operating system type (Playwright, Windows, Mac, or Android)"
     )
-    parser.add_argument("--max_iters", type=int, default=5, help="Maximum number of iterations")
-    parser.add_argument("--instruction", type=str, default="Search Xiamen weather tomorrow", help="User instruction")
+    parser.add_argument("--max_iters", type=int, default=30, help="Maximum number of iterations")
+    parser.add_argument("--instruction", type=str, default="去携程上搜索明天单程的（2025-10-23）北京到上海最便宜的机票信息", help="User instruction")
 
     # Feature switch parameters
-    parser.add_argument("--use_ocr", type=int, default=0, help="Whether to use OCR")
-    parser.add_argument("--use_icon_detect", type=int, default=0, help="Whether to use icon detection")
-    parser.add_argument("--use_icon_caption", type=int, default=0, help="Whether to use icon caption")
+    parser.add_argument("--use_ocr", type=int, default=1, help="Whether to use OCR")
+    parser.add_argument("--use_icon_detect", type=int, default=1, help="Whether to use icon detection")
+    parser.add_argument("--use_icon_caption", type=int, default=1, help="Whether to use icon caption")
     parser.add_argument("--use_memory", type=int, default=1, help="Whether to enable important content memory")
     parser.add_argument("--use_reflection", type=int, default=1, help="Whether to perform reflection")
     parser.add_argument("--use_som", type=int, default=0, help="Whether to draw visualization boxes on screenshots")
